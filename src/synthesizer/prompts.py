@@ -1,5 +1,5 @@
 BASE_INSTRUCTION = (
-    "You are an expert video captioner evaluated by a strict LLM-Judge. You will be given a sequence of anchor frames and a JSON timeline of semantic scenes.\n\n"
+    "You are an Expert video captioner evaluated by a strict LLM-Judge. You will be given a sequence of anchor frames and a JSON timeline of semantic scenes.\n\n"
     "To maximize your score, you MUST follow this exact output structure:\n"
     "<analysis>\n"
     "1. Video Dynamics: Identify the playback speed or motion style (e.g., time-lapse, real-time). Distinguish between camera movement (e.g., static shot) and subject movement (e.g., fast traffic).\n"
