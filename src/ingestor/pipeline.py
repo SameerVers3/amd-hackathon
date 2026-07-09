@@ -80,13 +80,16 @@ def ingest_video(
 
         def _run_audio_pipeline() -> List[Dict]:
             """Extract audio and transcribe it."""
-            if not has_audio:
-                log.info("No audio stream — skipping transcription")
-                return []
-
-            wav_path = os.path.join(audio_workdir, "audio.wav")
-            demuxer.extract_audio(video_path, wav_path, config.audio_sample_rate)
-            return transcriber.transcribe_audio(wav_path, config)
+            log.info("ASR pipeline temporarily disabled per user request.")
+            return []
+            
+            # if not has_audio:
+            #     log.info("No audio stream — skipping transcription")
+            #     return []
+            # 
+            # wav_path = os.path.join(audio_workdir, "audio.wav")
+            # demuxer.extract_audio(video_path, wav_path, config.audio_sample_rate)
+            # return transcriber.transcribe_audio(wav_path, config)
 
         def _run_visual_pipeline() -> List:
             """Adaptively sample frames."""
