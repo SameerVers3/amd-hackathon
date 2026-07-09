@@ -42,11 +42,17 @@ class IngestorConfig:
         default_factory=lambda: os.environ.get("FIREWORKS_API_KEY", "")
     )
     fireworks_api_base: str = "https://api.fireworks.ai/inference/v1"
+    
+    # Local Whisper config
     whisper_model: str = field(
-        default_factory=lambda: os.environ.get("WHISPER_MODEL", "whisper-v3")
+        default_factory=lambda: os.environ.get("WHISPER_MODEL", "turbo")
     )
-    whisper_language: str = "en"
-    whisper_temperature: float = 0.0
+    whisper_device: str = field(
+        default_factory=lambda: os.environ.get("WHISPER_DEVICE", "cpu")
+    )
+    whisper_compute_type: str = field(
+        default_factory=lambda: os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
+    )
 
     audio_sample_rate: int = 16_000  # in kilo hetz
 
