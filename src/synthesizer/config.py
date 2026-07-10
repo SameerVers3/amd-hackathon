@@ -15,7 +15,7 @@ class SynthesizerConfig:
     )
     
     max_retries: int = 3
-    max_tokens: int = 2000
+    max_tokens: int = 4000
     
     # Dynamic Sampling Parameters per style
     style_sampling: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {

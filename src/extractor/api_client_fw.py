@@ -41,6 +41,8 @@ class TokenBucketRateLimiter:
             await asyncio.sleep(wait_time)
 
 
+import re
+
 def build_prompt_messages(asr_text: str, b64_frames: List[str], chunk_id: int) -> List[dict]:
     content = [
         {"type": "text", "text": f"Chunk ID: {chunk_id}"},
@@ -54,11 +56,24 @@ def build_prompt_messages(asr_text: str, b64_frames: List[str], chunk_id: int) -
         
     content.append({
         "type": "text", 
-        "text": f"Audio Transcript: {asr_text}\nExtract atomic facts into valid JSON."
+        "text": f"Audio Transcript: {asr_text}\nExtract atomic facts from the visual and audio evidence into valid JSON."
     })
     
     return [{"role": "user", "content": content}]
 
+def _extract_json_from_text(content: str) -> dict:
+    # Try to find a markdown JSON block
+    match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
+    if match:
+        return json.loads(match.group(1))
+    
+    # Fallback to finding the first { and last }
+    start = content.find('{')
+    end = content.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        return json.loads(content[start:end+1])
+        
+    raise json.JSONDecodeError("Could not locate JSON boundaries", content, 0)
 
 async def call_api(
     session: aiohttp.ClientSession, 
@@ -86,8 +101,6 @@ async def call_api(
         "response_format": get_fireworks_schema()
     }
 
-
-    
     for attempt in range(max_retries):
         await rate_limiter.consume(estimated_tokens)
         
@@ -97,7 +110,7 @@ async def call_api(
                     data = await response.json()
                     content = data["choices"][0]["message"]["content"]
                     try:
-                        return json.loads(content)
+                        return _extract_json_from_text(content)
                     except json.JSONDecodeError:
                         log.error("API returned invalid JSON string: %s", content)
                         return None

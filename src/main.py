@@ -6,6 +6,11 @@ import tempfile
 import time
 import traceback
 
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "setconfig"))
+load_dotenv("setconfig")
+
 from captioner import REQUIRED_STYLES, generate_captions
 from utils import fetch_clip
 
@@ -66,36 +71,44 @@ def main() -> int:
         return 1
 
     results = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
     with tempfile.TemporaryDirectory() as workdir:
-        for task in tasks:
-            elapsed = time.monotonic() - start
-            if elapsed > MAX_RUNTIME_SECONDS:
-                log.warning(
-                    "Time budget exceeded (%.0fs); skipping remaining tasks", elapsed
-                )
-                results.append(
-                    {
-                        "task_id": task.get("task_id", "unknown"),
-                        "captions": {s: "" for s in task.get("styles") or REQUIRED_STYLES},
-                    }
-                )
-                continue
-
-            try:
-                results.append(process_task(task, workdir))
-            except Exception:
-                log.error(
-                    "Task %s failed:\n%s",
-                    task.get("task_id", "unknown"),
-                    traceback.format_exc(),
-                )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_to_task = {
+                executor.submit(process_task, task, workdir): task 
+                for task in tasks
+            }
+            
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                elapsed = time.monotonic() - start
                 
-                results.append(
-                    {
+                # Check budget after each completion (some may have started, but we limit what we wait for if we could)
+                if elapsed > MAX_RUNTIME_SECONDS:
+                    log.warning(
+                        "Time budget exceeded (%.0fs); marking task %s as failed", 
+                        elapsed, task.get("task_id", "unknown")
+                    )
+                    results.append({
                         "task_id": task.get("task_id", "unknown"),
                         "captions": {s: "" for s in task.get("styles") or REQUIRED_STYLES},
-                    }
-                )
+                    })
+                    continue
+
+                try:
+                    res = future.result()
+                    results.append(res)
+                except Exception as exc:
+                    log.error(
+                        "Task %s failed:\n%s",
+                        task.get("task_id", "unknown"),
+                        traceback.format_exc(),
+                    )
+                    results.append({
+                        "task_id": task.get("task_id", "unknown"),
+                        "captions": {s: "" for s in task.get("styles") or REQUIRED_STYLES},
+                    })
 
     write_results(OUTPUT_PATH, results)
     log.info("Wrote %d results to %s in %.1fs", len(results), OUTPUT_PATH, time.monotonic() - start)

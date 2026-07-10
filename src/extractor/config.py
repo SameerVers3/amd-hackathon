@@ -14,7 +14,7 @@ class ExtractorConfig:
     chat_endpoint: str = "/chat/completions"
     
     gemma_model: str = field(
-        default_factory=lambda: os.environ.get("GEMMA_MODEL", "accounts/fireworks/models/minimax-m3") # using this just to complete the pipeline, will change eventually to gemma
+        default_factory=lambda: os.environ.get("GEMMA_MODEL", "accounts/fireworks/models/minimax-m3")
     )
    
     # this is also paid -> someone please give free way to use gemma :(
@@ -30,7 +30,7 @@ class ExtractorConfig:
     
     temperature: float = 0.1
     top_p: float = 0.9
-    max_tokens: int = 300
+    max_tokens: int = 1500
     
     max_concurrent_requests: int = 20
     
@@ -44,8 +44,8 @@ class ExtractorConfig:
     
     system_prompt: str = (
         "You are a multimodal atomic fact extractor. "
-        "Analyze the provided visual frames and the accompanying audio transcript. "
-        "Extract exactly the requested fields into valid JSON with the following schema:\n"
+        "Analyze the provided visual frames and extract exactly the requested fields into valid JSON.\n"
+        "WARNING: Output ONLY the raw JSON object. Do not include any Chain-of-Thought, reasoning, explanations, or markdown formatting.\n"
         "{\n"
         '  "visual_objects": ["list of physical objects"],\n'
         '  "actions": ["list of discrete actions"],\n'

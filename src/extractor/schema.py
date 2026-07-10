@@ -19,7 +19,7 @@ class AtomicFacts(BaseModel):
         ..., description="Details about the camera angle, movement, or lighting"
     )
     audio_visual_correlation: str = Field(
-        ..., description="How the audio dialogue correlates with the visuals"
+        ..., description="How the audio dialogue correlates with the visuals (or 'No audio' if silent)"
     )
 
 

@@ -10,7 +10,7 @@ class CompressorConfig:
     chat_endpoint: str = "/chat/completions"
     
     e4b_model: str = field(
-        default_factory=lambda: os.environ.get("E4B_MODEL", "accounts/fireworks/models/minimax-m3")
+        default_factory=lambda: os.environ.get("E4B_MODEL", "accounts/fireworks/models/glm-5p2")
     )
     
     temperature: float = 0.3

@@ -16,12 +16,21 @@ def sanitize_caption(api_response: str) -> str:
     match = re.search(r'<caption>\s*(.*?)\s*</caption>', api_response, re.DOTALL | re.IGNORECASE)
     if match:
         caption = match.group(1).strip()
-        # Clean up any markdown or stray quotes
         return caption.strip('"').strip("'")
-    else:
-        # Fallback if model fails to use tags
-        log.warning("No <caption> tags found in response. Returning raw text.")
-        return api_response.strip()
+        
+    # Fallback: if there is an opening tag but it got truncated before the closing tag
+    match = re.search(r'<caption>\s*(.*)', api_response, re.DOTALL | re.IGNORECASE)
+    if match:
+        caption = match.group(1).strip()
+        return caption.strip('"').strip("'")
+        
+    # Final fallback: manually strip out the analysis block if tags were completely missed
+    if "<analysis>" in api_response:
+        api_response = re.sub(r'<analysis>.*?</analysis>', '', api_response, flags=re.DOTALL | re.IGNORECASE)
+        api_response = re.sub(r'<analysis>.*', '', api_response, flags=re.DOTALL | re.IGNORECASE) # if closing tag missing
+        
+    log.warning("No <caption> tags found in response. Returning cleaned raw text.")
+    return api_response.strip().strip('"').strip("'")
 
 def build_multimodal_payload(timeline_json: str, b64_frames: List[str]) -> List[dict]:
     # Interleaves timeline JSON and frames
