@@ -43,6 +43,47 @@ def build_multimodal_payload(timeline_json: str, b64_frames: List[str]) -> List[
     content.append({"type": "text", "text": f"Here is the semantic timeline:\n{timeline_json}"})
     return [{"role": "user", "content": content}]
 
+async def _evaluate_caption(
+    session: aiohttp.ClientSession,
+    caption: str,
+    style: str,
+    config: SynthesizerConfig
+) -> dict:
+    url = f"{config.fireworks_api_base}{config.chat_endpoint}"
+    headers = {
+        "Authorization": f"Bearer {config.fireworks_api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    judge_prompt = (
+        f"You are a strict LLM-Judge. Evaluate the following video caption based on the requested style: {style.upper()}.\n"
+        "Criteria:\n"
+        "1. Accuracy: Does it describe a realistic visual scene?\n"
+        "2. Style Match: Does it perfectly match the tone without being overly long?\n"
+        "3. Length: Is it 1-2 sentences?\n\n"
+        f"Caption to evaluate:\n{caption}\n\n"
+        "Respond ONLY with a valid JSON object: {\"score\": <integer 1-10>, \"feedback\": \"<your critique and instructions on how to improve it>\"}"
+    )
+    
+    payload = {
+        "model": "accounts/fireworks/models/glm-5p2",
+        "messages": [{"role": "user", "content": judge_prompt}],
+        "temperature": 0.1,
+        "max_tokens": 500,
+        "response_format": {"type": "json_object"}
+    }
+    
+    try:
+        async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as response:
+            if response.status == 200:
+                data = await response.json()
+                content = data["choices"][0]["message"]["content"]
+                return json.loads(content)
+    except Exception as e:
+        log.warning("Judge failed: %s", e)
+        
+    return {"score": 10, "feedback": ""}  # Fail open
+
 async def call_31b_api(
     session: aiohttp.ClientSession,
     style: str,
@@ -50,7 +91,6 @@ async def call_31b_api(
     b64_frames: List[str],
     config: SynthesizerConfig
 ) -> Optional[str]:
-    # Calls Fireworks API for a specific style
     url = f"{config.fireworks_api_base}{config.chat_endpoint}"
     headers = {
         "Authorization": f"Bearer {config.fireworks_api_key}",
@@ -58,47 +98,61 @@ async def call_31b_api(
     }
     
     params = config.style_sampling.get(style, {"temperature": 0.5, "top_p": 0.9})
-    system_prompt = build_system_prompt(style)
+    base_system_prompt = build_system_prompt(style)
     user_message = build_multimodal_payload(timeline_json, b64_frames)
     
-    payload = {
-        "model": config.model_id,
-        "messages": [{"role": "system", "content": system_prompt}] + user_message,
-        "temperature": params["temperature"],
-        "top_p": params["top_p"],
-        "max_tokens": config.max_tokens
-    }
+    best_caption = None
+    best_score = -1
     
-    for attempt in range(config.max_retries):
-        try:
-            async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    choice = data.get("choices", [{}])[0]
-                    message = choice.get("message", {})
-                    content = message.get("content")
-                    
-                    if not content:
-                        reasoning = message.get("reasoning_content", "")
-                        finish = choice.get("finish_reason")
-                        log.error("API returned no content. Finish reason: %s. Reasoning: %s...", finish, reasoning[:100])
-                        return None
-                        
-                    return sanitize_caption(content)
-                    
-                elif response.status == 429:
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    await asyncio.sleep(wait_time)
-                else:
-                    text = await response.text()
-                    log.error("API failed %d for style %s: %s", response.status, style, text)
-                    if response.status < 500:
-                        return None
-                    await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
-                    
-        except Exception as e:
-            log.warning("Exception during API call for style %s (Attempt %d): %s: %s", style, attempt + 1, type(e).__name__, str(e))
-            await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
+    # Self-Judge Loop (Max 3 iterations)
+    for iteration in range(3):
+        system_prompt = base_system_prompt
+        
+        payload = {
+            "model": config.model_id,
+            "messages": [{"role": "system", "content": system_prompt}] + user_message,
+            "temperature": params["temperature"],
+            "top_p": params["top_p"],
+            "max_tokens": config.max_tokens
+        }
+        
+        caption = None
+        for attempt in range(config.max_retries):
+            try:
+                async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        raw_content = data["choices"][0]["message"]["content"]
+                        if raw_content:
+                            caption = sanitize_caption(raw_content)
+                            break
+                    elif response.status == 429:
+                        await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
+            except Exception as e:
+                log.warning("Exception during API call: %s", e)
+                await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
+                
+        if not caption:
+            log.error("Failed to generate caption for style %s", style)
+            return best_caption
             
-    log.error("Max retries exceeded for style %s", style)
-    return None
+        # Call Self-Judge
+        judge_result = await _evaluate_caption(session, caption, style, config)
+        score = judge_result.get("score", 0)
+        feedback = judge_result.get("feedback", "")
+        
+        log.info("Style: %s | Iteration: %d | Score: %d/10 | Feedback: %s", style, iteration+1, score, feedback)
+        
+        if score > best_score:
+            best_score = score
+            best_caption = caption
+            
+        if score >= 8:
+            log.info("Caption reached target score %d/10. Early exiting judge loop.", score)
+            break
+            
+        # Append feedback for next iteration
+        user_message.append({"role": "assistant", "content": f"<caption>\n{caption}\n</bbox>"})
+        user_message.append({"role": "user", "content": f"JUDGE FEEDBACK: Your previous caption scored {score}/10. Critique: {feedback}\nPlease generate a new, improved caption fixing these issues."})
+        
+    return best_caption

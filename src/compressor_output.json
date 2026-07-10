@@ -1,0 +1,24 @@
+{
+  "scenes": [
+    {
+      "scene_id": 1,
+      "time_start_sec": 0.0,
+      "time_end_sec": 6.0,
+      "scene_summary": "An elevated, static wide-angle shot captures a bustling urban city street during autumn, flanked by trees with yellow foliage and high-rise buildings, with distant mountains on the horizon. Warm golden-hour lighting illuminates the scene as cars, trucks, and buses flow continuously through the multi-lane road in both directions.",
+      "key_objects": [
+        "high-rise apartment buildings",
+        "trees with yellow autumn foliage",
+        "multi-lane road",
+        "cars, trucks, and buses",
+        "traffic lights",
+        "distant mountains"
+      ],
+      "key_actions": [
+        "vehicles driving along the road",
+        "traffic flowing through the intersection",
+        "vehicles moving in multiple lanes"
+      ],
+      "dialogue_summary": "No dialogue is present in this segment."
+    }
+  ]
+}

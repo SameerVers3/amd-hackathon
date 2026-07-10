@@ -1,0 +1,29 @@
+[
+  {
+    "task_id": "v1",
+    "captions": {
+      "formal": "An elevated time-lapse sequence captures continuous traffic flowing along a multi-lane urban street bordered by yellow autumn foliage. High-rise buildings stand in the background under warm sunlight.",
+      "sarcastic": "A relentless swarm of blurred vehicles speeds mindlessly down a multi-lane city street, completely ignoring the vibrant yellow autumn trees and towering apartment blocks in their frantic rush to reach their identical concrete destinations.",
+      "humorous_tech": "The city's physical layer is experiencing massive throughput as countless vehicular data packets route rapidly down the multi-lane arterial bus, completely bypassing the legacy yellow-leaf infrastructure on the periphery.",
+      "humorous_non_tech": "A fleet of blurry cars rushes down a multi-lane city avenue, completely ignoring the trees' desperate attempt to show off their bright yellow autumn leaves."
+    }
+  },
+  {
+    "task_id": "v2",
+    "captions": {
+      "formal": "An orange tabby kitten walks forward through a wooded area, looking directly at the camera while dappled sunlight filters through the surrounding green foliage onto the dirt ground.",
+      "sarcastic": "An orange tabby kitten slowly advances through the dirt and weeds, staring at the camera with the intense, unblinking focus of a tiny creature who has absolutely no idea where it's going.",
+      "humorous_tech": "An orange feline endpoint initiates a slow ping request to the monitoring server, patiently waiting for an admin response while nested inside a leafy NAT firewall.",
+      "humorous_non_tech": "An orange kitten sits perfectly still in the dirt beneath some leafy branches, staring at the camera with the unblinking intensity of a tiny landlord who just noticed a late payment."
+    }
+  },
+  {
+    "task_id": "v3",
+    "captions": {
+      "formal": "A woman wearing a beige jacket, an orange top, and earphones sits at a white desk in a modern office. She types on a keyboard while looking at a large computer monitor, with a potted plant visible in the background.",
+      "sarcastic": "Another soul-crushing day in the modern office, where a woman in a beige blazer dutifully types on her keyboard, completely mesmerized by the black void of her computer monitor. At least the potted plant behind her seems to be thriving in this sterile corporate paradise.",
+      "humorous_tech": "A dedicated end-user is actively processing manual keyboard input at her workstation, completely unaware of the catastrophic spaghetti routing failure occurring on the physical layer directly beneath her mouse.",
+      "humorous_non_tech": "A woman sits frozen at a pristine white desk, intensely focused on the back of a large black screen. Beside her hand, a chaotic tangle of black wire rests in total defeat, clearly having given up on life."
+    }
+  }
+]

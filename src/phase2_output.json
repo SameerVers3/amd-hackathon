@@ -1,0 +1,61 @@
+[
+  {
+    "chunk_id": 0,
+    "time_start_sec": 0.0,
+    "time_end_sec": 4.0,
+    "asr_text": "",
+    "atomic_facts": {
+      "visual_objects": [
+        "High-rise apartment buildings",
+        "Trees with yellow autumn foliage",
+        "Multi-lane road",
+        "Cars",
+        "Traffic lights",
+        "Street lamps",
+        "Road signs",
+        "Banners on light poles",
+        "Distant mountains",
+        "Sky"
+      ],
+      "actions": [
+        "Cars driving along the road",
+        "Vehicles moving in both directions",
+        "Traffic flowing through the intersection"
+      ],
+      "setting": "Urban city street during autumn, with a wide multi-lane road flanked by yellow-leaved trees, high-rise residential buildings in the background, and distant mountains visible on the horizon",
+      "camera_or_lighting": "Elevated, static wide-angle shot capturing the entire street scene; warm, golden-hour lighting suggesting late afternoon with soft sunlight illuminating the buildings and trees",
+      "audio_visual_correlation": "No audio transcript is provided, so no correlation between audio and visuals can be established."
+    }
+  },
+  {
+    "chunk_id": 1,
+    "time_start_sec": 4.0,
+    "time_end_sec": 6.0,
+    "asr_text": "",
+    "atomic_facts": {
+      "visual_objects": [
+        "high-rise apartment buildings",
+        "commercial buildings",
+        "trees with yellow autumn foliage",
+        "multi-lane road",
+        "cars",
+        "trucks",
+        "buses",
+        "street lamps",
+        "traffic lights",
+        "road signs",
+        "pedestrian crosswalk markings",
+        "distant mountains",
+        "sky"
+      ],
+      "actions": [
+        "vehicles driving along the road",
+        "vehicles moving in multiple lanes",
+        "vehicles approaching and receding from the camera viewpoint"
+      ],
+      "setting": "Urban city street during autumn, with a wide multi-lane road flanked by trees with yellow leaves, surrounded by high-rise residential and commercial buildings, with mountains visible in the distant background.",
+      "camera_or_lighting": "Elevated, static wide-angle shot looking down the length of the road; warm golden-hour lighting suggesting late afternoon or early evening, casting long shadows and illuminating the yellow foliage.",
+      "audio_visual_correlation": "No audio transcript is provided, so no correlation between audio and visuals can be determined."
+    }
+  }
+]

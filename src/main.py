@@ -74,7 +74,7 @@ def main() -> int:
     from concurrent.futures import ThreadPoolExecutor, as_completed
     
     with tempfile.TemporaryDirectory() as workdir:
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             future_to_task = {
                 executor.submit(process_task, task, workdir): task 
                 for task in tasks
