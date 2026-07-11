@@ -31,7 +31,7 @@ REQUIRED_STYLES = ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
 API_KEY = os.environ.get("FIREWORKS_API_KEY", "")
 API_BASE = "https://api.fireworks.ai/inference/v1"
 MODEL = os.environ.get("FIREWORKS_MODEL", "accounts/fireworks/models/kimi-k2p6")
-MAX_FRAMES = int(os.environ.get("MAX_FRAMES", "3"))
+MAX_FRAMES = int(os.environ.get("MAX_FRAMES", "4"))
 FRAME_WIDTH = 768
 MAX_RETRIES = 5
 
@@ -114,36 +114,8 @@ def _sample_timestamps(duration: float, max_frames: int) -> List[float]:
 
 
 def extract_frames(video_path: str, frame_dir: str, max_frames: int = MAX_FRAMES) -> List[str]:
-    """Extract frames dynamically using scene detection, falling back to anchors."""
+    """Extract anchor frames from video. Returns list of frame file paths."""
     os.makedirs(frame_dir, exist_ok=True)
-    
-    # 1. Try dynamic scene cut extraction
-    import glob
-    scene_dir = os.path.join(frame_dir, "scenes")
-    os.makedirs(scene_dir, exist_ok=True)
-    scene_pattern = os.path.join(scene_dir, "scene_%04d.jpg")
-    
-    cmd_scene = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-vf", f"select='gt(scene,0.15)',scale={FRAME_WIDTH}:-1",
-        "-vsync", "vfr", "-q:v", "3", scene_pattern
-    ]
-    try:
-        subprocess.run(cmd_scene, check=True, capture_output=True, text=True)
-        scene_frames = sorted(glob.glob(os.path.join(scene_dir, "scene_*.jpg")))
-        
-        if len(scene_frames) >= max_frames:
-            log.info("Extracted %d scene cuts, sampling %d evenly", len(scene_frames), max_frames)
-            sampled = []
-            for i in range(max_frames):
-                idx = i * (len(scene_frames) - 1) // (max_frames - 1)
-                sampled.append(scene_frames[idx])
-            return sampled
-    except Exception as e:
-        log.warning("Scene extraction failed or yielded too few frames, falling back to anchors: %s", e)
-
-    # 2. Fallback to fast anchor timestamps
-    log.info("Falling back to evenly spaced anchor frames")
     duration = _probe_duration(video_path)
     if not duration:
         duration = 60.0  # fallback
@@ -294,7 +266,7 @@ def write_caption(description: str, style: str, prior_captions: List[str]) -> st
         max_tokens=140, temperature=temp, reasoning_effort="none"
     ).strip().strip('"')
 
-    # Style retry: if sarcastic/tech caption is too plain, retry once
+    # Style retry: if sarcastic/tech caption is still missing keywords, force them
     if _needs_style_retry(style, caption):
         if style == "humorous_tech":
             retry_prompt = (
