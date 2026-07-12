@@ -236,15 +236,33 @@ SARCASM_MARKERS = {
     "obviously", "serious", "thrilling",
 }
 
+_TECH_WORDS_RE = re.compile(
+    r"\b("
+    r"wi-?fi|internet|online|website|apps?|software|hardware|computers?|laptops?|"
+    r"phones?|smartphones?|iphone|android|screens?|monitor|keyboard|robots?|robotic|"
+    r"ai|algorithms?|coding|programming|programmer|developer|debug|debugging|deploys?|"
+    r"deployed|database|digital|electronic|electronics|tech|technology|browser|email|"
+    r"texting|password|pixels?|buffering|downloads?|downloading|uploads?|uploading|"
+    r"reboots?|rebooting|battery|batteries|bluetooth|gps|drones?|livestream|podcast|"
+    r"selfie|video ?games?|videogames?|glitch|glitching|notifications?|spreadsheets?|"
+    r"hashtag|autocorrect|screensaver|cpu|gpu|usb|hdmi|scientists?|scientific|physics|"
+    r"chemistry|biology|laboratory|molecules?|atoms?|gravity|dna"
+    r")\b",
+    re.IGNORECASE,
+)
 
-def write_caption(description: str, style: str, prior_captions: List[str]) -> str:
+
+def write_caption(description: str, style: str, formal_caption: str) -> str:
     """Text-only caption generation from verified description."""
-    variety_note = ""
-    if prior_captions:
-        variety_note = (
-            "\n\nCaptions already written for this clip in other styles. "
-            "Use a different sentence structure and comedic angle: "
-            + " | ".join(prior_captions)
+    grounding_note = ""
+    if formal_caption and style != "formal":
+        grounding_note = (
+            "\n\nLOCKED GROUNDING CAPTION (formal, verified facts):\n"
+            f"\"{formal_caption}\"\n"
+            "You MUST reuse only the specific subjects, actions, and objects named "
+            "in that formal caption (or clearly visible alongside them). Do not "
+            "introduce new background colours, counts, or side details absent "
+            "from the formal caption."
         )
 
     prompt = (
@@ -257,7 +275,7 @@ def write_caption(description: str, style: str, prior_captions: List[str]) -> st
         "such as sniffing, speaking, demanding, performing, or reacting unless explicitly observed. "
         "Do not quote signs, brands, or identity labels unless they are explicitly present in the factual description. "
         "Output only the caption text."
-        f"{variety_note}"
+        f"{grounding_note}"
     )
 
     temp = 0.75 if style in CREATIVE_STYLES else 0.2
@@ -273,6 +291,13 @@ def write_caption(description: str, style: str, prior_captions: List[str]) -> st
                 "Rewrite the caption. It was too formal and lacked tech flavor. "
                 "You MUST include at least one clear technology, programming, or software engineering term "
                 "(like cache, api, deploy, debug, latency). Keep the exact same facts."
+            )
+        elif style == "humorous_non_tech":
+            leaks = sorted({m.group(0).lower() for m in _TECH_WORDS_RE.finditer(caption)})
+            retry_prompt = (
+                "Rewrite the caption. It violated the absolute ban on technology/science references. "
+                f"You used banned words: {', '.join(leaks)}. "
+                "Rewrite it with ZERO such references, using only relatable everyday humor. Keep the exact same facts."
             )
         else:
             retry_prompt = (
@@ -296,6 +321,8 @@ def _needs_style_retry(style: str, caption: str) -> bool:
         return not any(word in normalized for word in TECH_KEYWORDS)
     if style == "sarcastic":
         return not any(marker in normalized for marker in SARCASM_MARKERS)
+    if style == "humorous_non_tech":
+        return bool(_TECH_WORDS_RE.search(caption))
     return False
 
 
@@ -338,13 +365,23 @@ def generate_captions(video_path: str, styles: List[str]) -> Dict[str, str]:
 
         # Step 3: Write captions per style
         captions: Dict[str, str] = {}
-        prior: List[str] = []
+        
+        formal_text = ""
+        if "formal" in styles:
+            log.info("Step 3: Writing caption for style=formal (GROUNDING ANCHOR)")
+            caption = write_caption(verified, "formal", "")
+            caption = _clean_caption(caption)
+            captions["formal"] = caption
+            formal_text = caption
+            log.info("Caption [formal]: %s", caption[:150])
+
         for style in styles:
+            if style == "formal":
+                continue
             log.info("Step 3: Writing caption for style=%s", style)
-            caption = write_caption(verified, style, prior)
+            caption = write_caption(verified, style, formal_text)
             caption = _clean_caption(caption)
             captions[style] = caption
-            prior.append(caption)
             log.info("Caption [%s]: %s", style, caption[:150])
 
     return captions
