@@ -1,26 +1,27 @@
 """
-Verified-Scene Video Captioning Pipeline.
+Single-Call MiniMax-M3 Captioning Pipeline
+Architecture adapted from Competitor 5 (scored 0.90)
 
-3-step approach inspired by top-scoring competitor:
-  Step 1: describe_scene()  — VLM sees 3 frames → 2-4 factual sentences
-  Step 2: verify_description() — VLM sees same 3 frames + draft → corrects errors
-  Step 3: write_caption() — Text-only, per style → 25-60 word caption
+Key differences from our previous 0.68 approach:
+- ONE API call per video instead of 5
+- All 4 captions generated together in JSON
+- No second model (Kimi removed)
+- No Whisper (removed complexity)
+- Sequential processing (no rate limits)
 """
 
 import base64
+import glob
 import json
-import io
 import logging
 import os
 import re
 import subprocess
 import tempfile
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception_type
-from PIL import Image
 
 log = logging.getLogger(__name__)
 
@@ -30,10 +31,9 @@ REQUIRED_STYLES = ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
 
 API_KEY = os.environ.get("FIREWORKS_API_KEY", "")
 API_BASE = "https://api.fireworks.ai/inference/v1"
-MODEL = os.environ.get("FIREWORKS_MODEL", "accounts/fireworks/models/kimi-k2p6")
-MAX_FRAMES = int(os.environ.get("MAX_FRAMES", "4"))
-FRAME_WIDTH = 768
-MAX_RETRIES = 5
+MODEL = "accounts/fireworks/models/minimax-m3"
+FRAME_WIDTH = 512
+MAX_FRAMES = 10
 
 # ── Retry-safe HTTP errors ──────────────────────────────────────────────────
 
@@ -46,99 +46,232 @@ class RetryableHTTPError(Exception):
         super().__init__(f"HTTP {status_code}: {detail}")
 
 
+# ── System Prompt (adapted from Competitor 5's proven prompts) ──────────────
+
+SYSTEM_PROMPT = """
+You are an expert multimodal video captioning system.
+
+You receive multiple frames sampled chronologically from a short video clip.
+
+Treat all frames as one continuous video.
+
+Infer the overall scene, actions, subjects, objects, and setting.
+
+Your highest priority is visual accuracy.
+
+
+OBJECTIVES
+
+Priority 1: Produce captions that accurately describe the visible content.
+Priority 2: Make every requested style clearly different.
+Priority 3: Write natural, fluent English.
+
+
+VISUAL GROUNDING RULES
+
+Always:
+✓ Describe only what is visible.
+✓ Mention important actions, objects, interactions, and the overall setting.
+✓ Summarize the entire clip instead of individual frames.
+
+Never:
+✗ Invent dialogue, names, brands, locations, occupations, emotions (unless visually obvious), sounds, text on signs, or events outside the clip.
+If uncertain, use generic wording.
+
+Good: "A person walks through a market."
+Bad: "John happily walks through Times Square after buying groceries."
+
+
+STYLE CONSISTENCY
+
+Every caption must describe the SAME video.
+Only the writing style should change.
+Do not simply replace a few words.
+Each style should sound like it was written by a different person.
+Avoid repeated sentence structures, wording, or phrases across styles.
+
+
+STYLE: FORMAL
+
+Role: Professional visual description
+Definition: Write like a professional journalist, documentary narrator, or museum curator. Neutral, objective, factual, polished. Describe only observable visual information. Never speculate about emotions, identities, intentions, or events outside the clip.
+Rules:
+• Professional tone.
+• Third-person perspective.
+• Complete grammatical sentences.
+• No jokes, sarcasm, slang, emojis, or exclamation marks.
+• Describe the overall clip instead of individual frames.
+Calibration Examples:
+• "A cyclist rides through a tree-lined intersection while nearby traffic moves steadily."
+• "An orange kitten walks through a garden filled with green plants and fallen leaves."
+• "An office employee works at a computer inside a modern open-plan workspace."
+• "Several children play soccer on a grassy field during daylight."
+• "A chef prepares food in a commercial kitchen using stainless-steel equipment."
+
+
+STYLE: SARCASTIC
+
+Role: Dry, deadpan internet sarcasm
+Definition: Use subtle, clever sarcasm while remaining factually accurate. The humor should come from ironic observation instead of insults, cruelty, or absurd exaggeration.
+Rules:
+• Keep factual accuracy.
+• Use one sarcastic observation.
+• Never invent events or insult people.
+• No profanity.
+• Keep sarcasm light and witty.
+Calibration Examples:
+• "Wow, another person answering emails. History is being made."
+• "A cat walking through a garden. Truly groundbreaking cinema."
+• "Nothing says excitement like someone staring at a spreadsheet."
+• "Breaking news: traffic continues to exist."
+• "The meeting appears to be going exactly as everyone dreamed."
+
+
+STYLE: HUMOROUS_TECH
+
+Role: Technology and programming humor
+Definition: Describe the actual scene while making the joke using software, programming, AI, computer science, engineering, gaming, robotics, or technology references. The technical joke should naturally fit the visual content.
+Rules:
+• Always describe the visible scene.
+• Use programming or software analogies.
+• AI, debugging, APIs, algorithms, versioning, memory, networking, and operating systems are encouraged.
+• Avoid random technical buzzwords.
+• Keep the joke understandable.
+Calibration Examples:
+• "The cat successfully updated its pathfinding algorithm and avoided every obstacle."
+• "The office worker appears to be compiling deadlines with several unresolved warnings."
+• "Those autumn trees clearly deployed Color Palette v2.0."
+• "The cyclist's route optimization algorithm is performing well."
+• "The chef is running a highly parallel cooking process with minimal latency."
+
+
+STYLE: HUMOROUS_NON_TECH
+
+Role: Relatable observational comedy
+Definition: Use lighthearted everyday humor without any technology, software, gaming, programming, engineering, or internet jargon. Imagine a family-friendly stand-up comedian making a quick observation.
+Rules:
+• No technical references whatsoever.
+• Playful but natural.
+• Family friendly.
+• Never invent events.
+• Base every joke on the visible scene.
+Calibration Examples:
+• "That cat is walking around like it owns the whole neighborhood."
+• "Everyone looks just busy enough to avoid making eye contact."
+• "Those trees clearly coordinated their outfits this season."
+• "Someone definitely practiced that move before today."
+• "The chef looks one spilled ingredient away from becoming a TV star."
+
+
+LENGTH
+
+Each caption should:
+• contain 15–40 words
+• be 1–2 sentences
+• remain concise
+
+
+OUTPUT FORMAT
+
+Return ONLY valid JSON.
+
+Do NOT include:
+- markdown
+- explanations
+- reasoning
+- notes
+- code fences
+
+The JSON MUST contain EXACTLY these keys:
+
+{
+    "formal": "...",
+    "sarcastic": "...",
+    "humorous_tech": "...",
+    "humorous_non_tech": "..."
+}
+
+Every value must be a string.
+Nothing may appear before or after the JSON.
+""".strip()
+
+
+USER_PROMPT = """
+Generate captions for the following styles: formal, sarcastic, humorous_tech, humorous_non_tech
+
+Requirements:
+- Base every caption ONLY on the provided video frames.
+- Treat the frames as one continuous video.
+- Do NOT describe frames individually.
+- Preserve the same factual content across every style.
+- Change ONLY the writing style and humor.
+- If something is uncertain, describe it generically.
+- Never hallucinate details.
+- Return ONLY the required JSON object.
+""".strip()
+
+
 # ── Fireworks API Client ────────────────────────────────────────────────────
 
 @retry(
-    stop=stop_after_attempt(MAX_RETRIES),
-    wait=wait_exponential_jitter(initial=1, max=32, jitter=2),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential_jitter(initial=2, max=30, jitter=3),
     retry=retry_if_exception_type((RetryableHTTPError, requests.RequestException)),
     reraise=True,
 )
-def _chat(messages: List[Dict], max_tokens: int = 700, temperature: float = 0.2,
-          json_mode: bool = False, reasoning_effort: Optional[str] = None) -> str:
+def _call_vision(messages: List[Dict], max_tokens: int = 4000, temperature: float = 0.7) -> str:
     url = f"{API_BASE}/chat/completions"
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
     }
-    payload: Dict[str, Any] = {
+    payload = {
         "model": MODEL,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
-    if reasoning_effort:
-        payload["reasoning_effort"] = reasoning_effort
-    if json_mode:
-        payload["response_format"] = {"type": "json_object"}
 
     resp = requests.post(url, headers=headers, json=payload, timeout=120)
     if resp.status_code in RETRY_STATUS_CODES:
         raise RetryableHTTPError(resp.status_code, resp.text[:500])
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    data = resp.json()
+    try:
+        content = data["choices"][0]["message"].get("content")
+        if content is None:
+            raise KeyError("content is None")
+        return content
+    except (KeyError, IndexError):
+        log.warning("Malformed response (missing content), triggering retry")
+        raise RetryableHTTPError(500, "Malformed response from Fireworks")
 
 
 # ── Frame Extraction ────────────────────────────────────────────────────────
 
-def _probe_duration(video_path: str) -> Optional[float]:
+def extract_frames(video_path: str, frame_dir: str) -> List[str]:
+    """Extract exactly 1 FPS up to MAX_FRAMES."""
+    os.makedirs(frame_dir, exist_ok=True)
+    out_pattern = os.path.join(frame_dir, "frame_%04d.jpg")
+
     cmd = [
-        "ffprobe", "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "json", video_path,
+        "ffmpeg", "-y", "-i", video_path,
+        "-vf", f"fps=1,scale={FRAME_WIDTH}:-1",
+        "-q:v", "3", out_pattern
     ]
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        data = json.loads(result.stdout)
-        dur = data.get("format", {}).get("duration")
-        return float(dur) if dur else None
-    except Exception:
-        return None
-
-
-def _sample_timestamps(duration: float, max_frames: int) -> List[float]:
-    if duration <= 0 or max_frames <= 0:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        log.warning("ffmpeg frame extraction failed: %s", e.stderr)
         return []
-    if max_frames == 1:
-        return [max(duration / 2, 0)]
-    start = min(0.5, max(duration * 0.05, 0))
-    end = max(duration - 0.5, start)
-    if end <= start:
-        return [max(duration / 2, 0)]
-    timestamps = []
-    for i in range(max_frames):
-        pos = i / (max_frames - 1)
-        ts = round(start + (end - start) * pos, 3)
-        timestamps.append(ts)
-    return timestamps
 
-
-def extract_frames(video_path: str, frame_dir: str, max_frames: int = MAX_FRAMES) -> List[str]:
-    """Extract anchor frames from video. Returns list of frame file paths."""
-    os.makedirs(frame_dir, exist_ok=True)
-    duration = _probe_duration(video_path)
-    if not duration:
-        duration = 60.0  # fallback
-    timestamps = _sample_timestamps(duration, max_frames)
-
-    frames: List[str] = []
-    for i, ts in enumerate(timestamps, start=1):
-        out_path = os.path.join(frame_dir, f"frame_{i:03d}.jpg")
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", f"{ts:.3f}",
-            "-i", video_path,
-            "-frames:v", "1",
-            "-vf", f"scale={FRAME_WIDTH}:-1",
-            "-q:v", "3",
-            out_path,
-        ]
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-            if os.path.exists(out_path):
-                frames.append(out_path)
-        except Exception:
-            pass
+    frames = sorted(glob.glob(os.path.join(frame_dir, "frame_*.jpg")))
+    if len(frames) > MAX_FRAMES:
+        sampled = []
+        for i in range(MAX_FRAMES):
+            idx = i * (len(frames) - 1) // (MAX_FRAMES - 1)
+            sampled.append(frames[idx])
+        return sampled
     return frames
 
 
@@ -148,240 +281,75 @@ def _frame_to_data_url(path: str) -> str:
     return f"data:image/jpeg;base64,{b64}"
 
 
-# ── Step 1: Describe Scene ──────────────────────────────────────────────────
+# ── Build Messages ──────────────────────────────────────────────────────────
 
-def describe_scene(frames: List[str]) -> str:
-    """VLM sees frames → produces 2-4 factual sentences."""
-    content: List[Dict[str, Any]] = []
-    content.append({
-        "type": "text",
-        "text": (
-            "These are frames sampled across a short video clip, in chronological order. "
-            "Note the setting, main subjects, specific action or motion, camera/scene changes, "
-            "and any readable on-screen text. Write 2-4 dense, factual sentences. "
-            "Be specific, do not generalize, and do not mention frames or analysis. "
-            "Do not infer an exact city, country, brand context, or organization unless clearly readable. "
-            "If an exact location is not directly visible, use generic wording like 'city street', 'office', or 'indoor room'. "
-            "Do not speculate about motives, unseen objects, identity, deadlines, or hidden context. "
-            "Use generic human descriptions unless a specific identity is directly relevant and visually certain."
-        ),
-    })
+def _build_messages(frames: List[str]) -> List[Dict]:
+    content = [{"type": "text", "text": USER_PROMPT}]
     for frame in frames:
-        content.append({"type": "image_url", "image_url": {"url": _frame_to_data_url(frame)}})
-    return _chat(
-        [{"role": "user", "content": content}],
-        max_tokens=220, temperature=0.2,
-    ).strip()
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": _frame_to_data_url(frame)}
+        })
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
 
 
-# ── Step 2: Verify Description ──────────────────────────────────────────────
+# ── Parse JSON Output ───────────────────────────────────────────────────────
 
-def verify_description(frames: List[str], draft: str) -> str:
-    """VLM sees frames + draft → corrects any hallucinations."""
-    content: List[Dict[str, Any]] = []
-    content.append({
-        "type": "text",
-        "text": (
-            f"Here is a draft description of these video frames:\n{draft}\n\n"
-            "Check it against the actual frames. If it is accurate and specific, repeat it unchanged. "
-            "If anything is wrong, too generic, or unsupported, correct it. "
-            "Remove exact quoted text, brand names, signs, ethnicity, identity labels, or location claims unless "
-            "they are clearly visible and central in the frames. Prefer generic wording when unsure. "
-            "Output only the final factual description. Do not mention frames, AI, uncertainty, or analysis."
-        ),
-    })
-    for frame in frames:
-        content.append({"type": "image_url", "image_url": {"url": _frame_to_data_url(frame)}})
-    return _chat(
-        [{"role": "user", "content": content}],
-        max_tokens=220, temperature=0.1,
-    ).strip()
+def _parse_captions(raw: str) -> Dict[str, str]:
+    cleaned = raw.strip()
 
+    # Strip markdown fences if present
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-z]*\n?", "", cleaned)
+        cleaned = re.sub(r"```$", "", cleaned).strip()
 
-# ── Step 3: Write Caption ───────────────────────────────────────────────────
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Model may have wrapped JSON in prose — extract the first JSON object
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if not match:
+            raise ValueError(f"No JSON found in output: {raw[:300]}")
+        try:
+            parsed = json.loads(match.group())
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in output: {raw[:300]}") from exc
 
-STYLE_PROMPTS = {
-    "formal": (
-        "Write a formal, professional, objective caption. Factual tone, no humor. "
-        "Style example only: 'The subject proceeds through the marked route without deviation.'"
-    ),
-    "sarcastic": (
-        "Write a sarcastic caption: dry, ironic, lightly mocking, grounded in the specific action described. "
-        "Use patterns like 'because apparently...', 'clearly...', 'naturally...', or 'of course...' when they fit. "
-        "The caption must be recognizably sarcastic; do not return a plain formal description. "
-        "Style example only: 'The subject surveys its kingdom of one bench with the confidence of a landlord.'"
-    ),
-    "humorous_tech": (
-        "Write a funny caption using technology, software, programming, network, game engine, or debugging references. "
-        "The caption must include at least one clear tech reference such as queue, deploy, debug, API, latency, "
-        "log, cache, scheduler, pipeline, rollback, commit, runtime, or bug. "
-        "Do not return a plain formal description. "
-        "Style example only: '404: graceful landing not found.'"
-    ),
-    "humorous_non_tech": (
-        "Write a funny everyday-humor caption with no technical jargon, relatable and light-hearted. "
-        "The caption must include a light everyday joke or comparison; do not return a plain formal description. "
-        "Style example only: 'Confidence level: main character. Execution level: blooper reel.'"
-    ),
-}
+    missing = [s for s in REQUIRED_STYLES if s not in parsed]
+    if missing:
+        raise ValueError(f"Missing styles: {missing}")
 
-CREATIVE_STYLES = {"sarcastic", "humorous_tech", "humorous_non_tech"}
-
-TECH_KEYWORDS = {
-    "api", "bug", "cache", "commit", "debug", "deploy", "latency",
-    "log", "pipeline", "queue", "rollback", "runtime", "scheduler",
-}
-SARCASM_MARKERS = {
-    "apparently", "because", "clearly", "naturally", "of course",
-    "obviously", "serious", "thrilling",
-}
-
-_TECH_WORDS_RE = re.compile(
-    r"\b("
-    r"wi-?fi|internet|online|website|apps?|software|hardware|computers?|laptops?|"
-    r"phones?|smartphones?|iphone|android|screens?|monitor|keyboard|robots?|robotic|"
-    r"ai|algorithms?|coding|programming|programmer|developer|debug|debugging|deploys?|"
-    r"deployed|database|digital|electronic|electronics|tech|technology|browser|email|"
-    r"texting|password|pixels?|buffering|downloads?|downloading|uploads?|uploading|"
-    r"reboots?|rebooting|battery|batteries|bluetooth|gps|drones?|livestream|podcast|"
-    r"selfie|video ?games?|videogames?|glitch|glitching|notifications?|spreadsheets?|"
-    r"hashtag|autocorrect|screensaver|cpu|gpu|usb|hdmi|scientists?|scientific|physics|"
-    r"chemistry|biology|laboratory|molecules?|atoms?|gravity|dna"
-    r")\b",
-    re.IGNORECASE,
-)
-
-
-def write_caption(description: str, style: str, formal_caption: str) -> str:
-    """Text-only caption generation from verified description."""
-    grounding_note = ""
-    if formal_caption and style != "formal":
-        grounding_note = (
-            "\n\nLOCKED GROUNDING CAPTION (formal, verified facts):\n"
-            f"\"{formal_caption}\"\n"
-            "You MUST reuse only the specific subjects, actions, and objects named "
-            "in that formal caption (or clearly visible alongside them). Do not "
-            "introduce new background colours, counts, or side details absent "
-            "from the formal caption."
-        )
-
-    prompt = (
-        f"{STYLE_PROMPTS.get(style, 'Match the requested style.')}\n\n"
-        f"Factual description of the video:\n{description}\n\n"
-        "Write ONE caption, 25 to 60 words, as if you personally watched the video. "
-        "Never mention computer vision, models, detection, frames, prompts, pipelines, or uncertainty. "
-        "Do not add events, objects, speech, or motives that are not in the description. "
-        "Humor may exaggerate the importance of visible actions only. Do not invent new actions "
-        "such as sniffing, speaking, demanding, performing, or reacting unless explicitly observed. "
-        "Do not quote signs, brands, or identity labels unless they are explicitly present in the factual description. "
-        "Output only the caption text."
-        f"{grounding_note}"
-    )
-
-    temp = 0.75 if style in CREATIVE_STYLES else 0.2
-    caption = _chat(
-        [{"role": "user", "content": prompt}],
-        max_tokens=140, temperature=temp, reasoning_effort="none"
-    ).strip().strip('"')
-
-    # Style retry: if sarcastic/tech caption is still missing keywords, force them
-    if _needs_style_retry(style, caption):
-        if style == "humorous_tech":
-            retry_prompt = (
-                "Rewrite the caption. It was too formal and lacked tech flavor. "
-                "You MUST include at least one clear technology, programming, or software engineering term "
-                "(like cache, api, deploy, debug, latency). Keep the exact same facts."
-            )
-        elif style == "humorous_non_tech":
-            leaks = sorted({m.group(0).lower() for m in _TECH_WORDS_RE.finditer(caption)})
-            retry_prompt = (
-                "Rewrite the caption. It violated the absolute ban on technology/science references. "
-                f"You used banned words: {', '.join(leaks)}. "
-                "Rewrite it with ZERO such references, using only relatable everyday humor. Keep the exact same facts."
-            )
-        else:
-            retry_prompt = (
-                "Rewrite the caption. It was too formal. "
-                "You MUST make the tone obviously sarcastic, dry, and ironic. "
-                "Use phrases like 'clearly', 'naturally', or 'of course'. Keep the exact same facts."
-            )
-
-        caption = _chat(
-            [{"role": "user", "content": prompt}, {"role": "assistant", "content": caption},
-             {"role": "user", "content": retry_prompt}],
-            max_tokens=140, temperature=temp, reasoning_effort="none"
-        ).strip().strip('"')
-
-    return caption
-
-
-def _needs_style_retry(style: str, caption: str) -> bool:
-    normalized = caption.lower()
-    if style == "humorous_tech":
-        return not any(word in normalized for word in TECH_KEYWORDS)
-    if style == "sarcastic":
-        return not any(marker in normalized for marker in SARCASM_MARKERS)
-    if style == "humorous_non_tech":
-        return bool(_TECH_WORDS_RE.search(caption))
-    return False
-
-
-# ── Clean Caption ────────────────────────────────────────────────────────────
-
-def _clean_caption(text: str) -> str:
-    text = text.strip()
-    text = text.replace("\\n", " ").replace("\\r", " ").replace("\\t", " ")
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
-        text = text[1:-1].strip()
-    return text
+    return {s: str(parsed[s]).strip() for s in REQUIRED_STYLES}
 
 
 # ── Main Entry Point ────────────────────────────────────────────────────────
 
 def generate_captions(video_path: str, styles: List[str]) -> Dict[str, str]:
-    """
-    Full 3-step verified-scene captioning pipeline.
-    """
     with tempfile.TemporaryDirectory() as workdir:
         frame_dir = os.path.join(workdir, "frames")
 
-        # Extract 3 anchor frames
-        log.info("Step 1: Extracting %d anchor frames from %s", MAX_FRAMES, video_path)
-        frames = extract_frames(video_path, frame_dir, MAX_FRAMES)
+        log.info("Extracting 1 FPS frames from %s", video_path)
+        frames = extract_frames(video_path, frame_dir)
         if not frames:
             log.error("No frames extracted from %s", video_path)
             return {s: "" for s in styles}
 
-        # Step 1: Describe
-        log.info("Step 1: Describing scene from %d frames", len(frames))
-        draft = describe_scene(frames)
-        log.info("Draft description: %s", draft[:200])
+        log.info("Sending %d frames to MiniMax-M3 (single-call)", len(frames))
+        messages = _build_messages(frames)
 
-        # Step 2: Verify
-        log.info("Step 2: Verifying description")
-        verified = verify_description(frames, draft)
-        log.info("Verified description: %s", verified[:200])
+        try:
+            raw = _call_vision(messages)
+            captions = _parse_captions(raw)
+        except (ValueError, json.JSONDecodeError) as e:
+            log.warning("First attempt parse failed: %s. Retrying with strict prompt...", e)
+            messages[0]["content"] += "\nReturn ONLY the raw JSON object, nothing else."
+            raw = _call_vision(messages)
+            captions = _parse_captions(raw)
 
-        # Step 3: Write captions per style
-        captions: Dict[str, str] = {}
-        
-        formal_text = ""
-        if "formal" in styles:
-            log.info("Step 3: Writing caption for style=formal (GROUNDING ANCHOR)")
-            caption = write_caption(verified, "formal", "")
-            caption = _clean_caption(caption)
-            captions["formal"] = caption
-            formal_text = caption
-            log.info("Caption [formal]: %s", caption[:150])
-
-        for style in styles:
-            if style == "formal":
-                continue
-            log.info("Step 3: Writing caption for style=%s", style)
-            caption = write_caption(verified, style, formal_text)
-            caption = _clean_caption(caption)
-            captions[style] = caption
-            log.info("Caption [%s]: %s", style, caption[:150])
+        for style, cap in captions.items():
+            log.info("Caption [%s]: %s", style, cap[:100])
 
     return captions

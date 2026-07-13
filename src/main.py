@@ -23,7 +23,6 @@ def _get_default_output():
 INPUT_PATH = os.environ.get("TASKS_INPUT_PATH", _get_default_input())
 OUTPUT_PATH = os.environ.get("RESULTS_OUTPUT_PATH", _get_default_output())
 
-# limits to 10 minutes by default, but can be overridden by env var for testing
 MAX_RUNTIME_SECONDS = int(os.environ.get("MAX_RUNTIME_SECONDS", 9 * 60))
 
 logging.basicConfig(
@@ -71,51 +70,38 @@ def main() -> int:
         return 1
 
     results = []
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    
-    max_workers = 1
-    
+
+    # Sequential processing — one task at a time to avoid rate limits
     with tempfile.TemporaryDirectory() as workdir:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_task = {
-                executor.submit(process_task, task, workdir): task 
-                for task in tasks
-            }
-            
-            for future in as_completed(future_to_task):
-                task = future_to_task[future]
-                elapsed = time.monotonic() - start
-                
-                if elapsed > MAX_RUNTIME_SECONDS:
-                    log.warning(
-                        "Time budget exceeded (%.0fs); marking task %s as failed", 
-                        elapsed, task.get("task_id", "unknown")
-                    )
-                    results.append({
-                        "task_id": task.get("task_id", "unknown"),
-                        "captions": {s: "The video shows a scene with visible subjects and activity." for s in task.get("styles") or REQUIRED_STYLES},
-                    })
-                    continue
+        for i, task in enumerate(tasks):
+            elapsed = time.monotonic() - start
+            remaining = MAX_RUNTIME_SECONDS - elapsed
 
-                try:
-                    res = future.result()
-                    for style, cap in res["captions"].items():
-                        if not cap:
-                            res["captions"][style] = "The video shows a scene with visible subjects and activity."
-                    results.append(res)
-                except Exception as exc:
-                    log.error(
-                        "Task %s failed:\n%s",
-                        task.get("task_id", "unknown"),
-                        traceback.format_exc(),
-                    )
+            if remaining <= 30:
+                log.warning("Time budget low (%.0fs left), filling remaining tasks", remaining)
+                for leftover in tasks[i:]:
                     results.append({
-                        "task_id": task.get("task_id", "unknown"),
-                        "captions": {s: "The video shows a scene with visible subjects and activity." for s in task.get("styles") or REQUIRED_STYLES},
+                        "task_id": leftover.get("task_id", "unknown"),
+                        "captions": {s: "" for s in leftover.get("styles") or REQUIRED_STYLES},
                     })
+                break
 
+            try:
+                res = process_task(task, workdir)
+                for style, cap in res["captions"].items():
+                    if not cap:
+                        res["captions"][style] = ""
+                results.append(res)
+            except Exception as exc:
+                log.error("Task %s failed:\n%s", task.get("task_id", "unknown"), traceback.format_exc())
+                results.append({
+                    "task_id": task.get("task_id", "unknown"),
+                    "captions": {s: "" for s in task.get("styles") or REQUIRED_STYLES},
+                })
+
+    elapsed = time.monotonic() - start
     write_results(OUTPUT_PATH, results)
-    log.info("Wrote %d results to %s in %.1fs", len(results), OUTPUT_PATH, time.monotonic() - start)
+    log.info("Wrote %d results to %s in %.1fs", len(results), OUTPUT_PATH, elapsed)
     return 0
 
 
